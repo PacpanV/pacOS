@@ -8,6 +8,6 @@ Personal collection of scripts, tools, and experiments by "Pacpan".
 
 ## Author
 
-Francisco "Pacpan"
+ "Pacpan"
 
 GitHub: <https://github.com/PacpanV>
