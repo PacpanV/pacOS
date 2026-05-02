@@ -1,0 +1,700 @@
+#!/bin/sh
+
+SUBNET="${1:-192.168.0}"
+INTERVAL="${INTERVAL:-1}"
+KNOWN_FILE="$HOME/lan-known-devices.txt"
+SSH_USERS_FILE="$HOME/lan-ssh-users.txt"
+AUTH_FILE="$HOME/lan-authorized-macs.txt"
+BLOCK_FILE="$HOME/lan-blocked-devices.txt"
+REMOTE_BLOCK_LOG="${REMOTE_BLOCK_LOG:-}"
+STATE_FILE="/tmp/lan-watcher-state"
+ONLINE_SINCE_FILE="$HOME/lan-online-since.txt"
+DEVICE_ROWS=8
+
+ESC=$(printf '\033')
+RESET="${ESC}[0m"
+BOLD="${ESC}[1m"
+RED="${ESC}[1;31m"
+TEXT="${ESC}[1;34m"
+GREEN="${ESC}[1;32m"
+YELLOW="${ESC}[1;33m"
+DIM="${ESC}[2m"
+
+INNER=77
+RIGHT_COL=82
+RIGHT_INNER=38
+FETCH_CACHE_DIR="/tmp/lan-watcher-fetch"
+TTY_FONT="/usr/share/consolefonts/CyrAsia-TerminusBold16.psf.gz"
+
+init_data_files() {
+    for file in "$KNOWN_FILE" "$SSH_USERS_FILE" "$AUTH_FILE" "$BLOCK_FILE" "$ONLINE_SINCE_FILE"; do
+        [ -f "$file" ] || : > "$file"
+    done
+}
+
+clear_screen() {
+    printf '%s[2J%s[H' "$ESC" "$ESC"
+}
+
+home_cursor() {
+    printf '%s[H' "$ESC"
+}
+
+clear_to_end() {
+    printf '%s[J' "$ESC"
+}
+
+move_cursor() {
+    printf '%s[%s;%sH' "$ESC" "$1" "$2"
+}
+
+show_cursor() {
+    printf '%s[?25h%s' "$ESC" "$RESET"
+}
+
+beep() {
+    if command -v speaker-test >/dev/null 2>&1; then
+        timeout -s KILL 1s speaker-test -D default -c 1 -t sine -f 880 -l 1 >/dev/null 2>&1 || true
+    else
+        printf '\a' > /dev/console 2>/dev/null || printf '\a' > /dev/tty 2>/dev/null || printf '\a'
+    fi
+}
+
+if [ "$1" = "--beep-test" ]; then
+    beep 1
+    exit 0
+fi
+
+setup_tty_font() {
+    tty_name=$(tty 2>/dev/null)
+    case "$tty_name" in
+        /dev/tty[0-9]*) ;;
+        *) return ;;
+    esac
+
+    command -v setfont >/dev/null 2>&1 || return
+    [ -f "$TTY_FONT" ] || return
+
+    setfont "$TTY_FONT" >/dev/null 2>&1 && return
+
+    if command -v sudo >/dev/null 2>&1; then
+        sudo -n setfont "$TTY_FONT" >/dev/null 2>&1 || true
+    fi
+}
+
+line() {
+    printf '%s' "$RED"
+    printf '┌'
+    i=1
+    while [ "$i" -le "$INNER" ]; do
+        printf '─'
+        i=$((i + 1))
+    done
+    printf '┐%s\n' "$RESET"
+}
+
+midline() {
+    printf '%s' "$RED"
+    printf '├'
+    i=1
+    while [ "$i" -le "$INNER" ]; do
+        printf '─'
+        i=$((i + 1))
+    done
+    printf '┤%s\n' "$RESET"
+}
+
+bottom_line() {
+    printf '%s' "$RED"
+    printf '└'
+    i=1
+    while [ "$i" -le "$INNER" ]; do
+        printf '─'
+        i=$((i + 1))
+    done
+    printf '┘%s\n' "$RESET"
+}
+
+box_text() {
+    text="$1"
+    printf '%s│%s %-75.75s %s│%s\n' "$RED" "$TEXT" "$text" "$RED" "$RESET"
+}
+
+right_line_at() {
+    row="$1"
+    left="$2"
+    right="$3"
+
+    move_cursor "$row" "$RIGHT_COL"
+    printf '%s%s' "$RED" "$left"
+    i=1
+    while [ "$i" -le "$RIGHT_INNER" ]; do
+        printf '─'
+        i=$((i + 1))
+    done
+    printf '%s%s' "$right" "$RESET"
+}
+
+right_text_at() {
+    row="$1"
+    text="$2"
+
+    move_cursor "$row" "$RIGHT_COL"
+    printf '%s│%s %-36.36s %s│%s' "$RED" "$TEXT" "$text" "$RED" "$RESET"
+}
+
+system_panel() {
+    os=$(awk -F= '$1 == "PRETTY_NAME" {gsub(/"/, "", $2); print $2; exit}' /etc/os-release 2>/dev/null)
+    [ -z "$os" ] && os=$(uname -s)
+
+    arch=$(uname -m)
+    kernel=$(uname -r)
+    up=$(uptime -p 2>/dev/null | sed 's/^up //')
+    [ -z "$up" ] && up="unknown"
+    os_birth=$(stat -c %W / 2>/dev/null)
+    case "$os_birth" in
+        ''|0|-1) os_birth=$(stat -c %Y /etc/machine-id 2>/dev/null) ;;
+    esac
+
+    if [ -n "$os_birth" ] && [ "$os_birth" -gt 0 ] 2>/dev/null; then
+        now=$(date +%s)
+        total_days=$(( (now - os_birth) / 86400 ))
+        years=$(( total_days / 365 ))
+        months=$(( (total_days % 365) / 30 ))
+        days=$(( (total_days % 365) % 30 ))
+        os_age="${years}y ${months}m ${days}d"
+    else
+        os_age="unknown"
+    fi
+
+    right_line_at 1 '┌' '┐'
+    right_text_at 2 'Host System'
+    right_line_at 3 '├' '┤'
+    right_text_at 4 "OS: $os"
+    right_text_at 5 "OS age: $os_age"
+    right_text_at 6 "Arch: $arch"
+    right_text_at 7 "Kernel: $kernel"
+    right_text_at 8 "Uptime: $up"
+    right_line_at 9 '└' '┘'
+    move_cursor 23 1
+}
+
+fallback_distro() {
+    printf 'unknown'
+}
+
+remote_user() {
+    if [ -f "$SSH_USERS_FILE" ]; then
+        user=$(awk -v ip="$1" '$1 == ip {print $2; exit}' "$SSH_USERS_FILE")
+        [ -n "$user" ] && printf '%s' "$user" && return
+    fi
+
+    printf ''
+}
+
+probe_remote_user() {
+    ip="$1"
+
+    for user in "$USER" root; do
+        [ -z "$user" ] && continue
+        if ssh -n -o BatchMode=yes -o ConnectTimeout=1 -o StrictHostKeyChecking=accept-new "$user@$ip" 'true' 2>/dev/null; then
+            if [ -f "$SSH_USERS_FILE" ]; then
+                if ! awk -v ip="$ip" '$1 == ip {found=1} END {exit found ? 0 : 1}' "$SSH_USERS_FILE"; then
+                    printf '%s %s\n' "$ip" "$user" >> "$SSH_USERS_FILE"
+                fi
+            else
+                printf '%s %s\n' "$ip" "$user" > "$SSH_USERS_FILE"
+            fi
+            printf '%s' "$user"
+            return
+        fi
+    done
+}
+
+local_fetch_info() {
+    distro=$(awk -F= '$1 == "PRETTY_NAME" {gsub(/"/, "", $2); print $2; exit}' /etc/os-release 2>/dev/null)
+    [ -z "$distro" ] && distro=$(uname -s)
+    kernel=$(uname -r)
+    up=$(uptime -p 2>/dev/null | sed 's/^up //')
+    [ -z "$up" ] && up="unknown"
+
+    printf '%s|%s|%s\n' "$distro" "$kernel" "$up"
+}
+
+short_uptime() {
+    printf '%s\n' "$1" | sed \
+        -e 's/,//g' \
+        -e 's/ days\{0,1\}/D/g' \
+        -e 's/ hours\{0,1\}/H/g' \
+        -e 's/ minutes\{0,1\}/M/g' \
+        -e 's/ seconds\{0,1\}/S/g'
+}
+
+short_duration() {
+    total="$1"
+    [ -z "$total" ] && total=0
+
+    days=$((total / 86400))
+    hours=$(((total % 86400) / 3600))
+    minutes=$(((total % 3600) / 60))
+
+    if [ "$days" -gt 0 ]; then
+        printf '%sD %sH' "$days" "$hours"
+    elif [ "$hours" -gt 0 ]; then
+        printf '%sH %sM' "$hours" "$minutes"
+    else
+        printf '%sM' "$minutes"
+    fi
+}
+
+fetch_info() {
+    ip="$1"
+    cache="$FETCH_CACHE_DIR/$ip"
+
+    mkdir -p "$FETCH_CACHE_DIR" 2>/dev/null
+
+    for self_ip in $(ip -4 addr show 2>/dev/null | awk '/inet / {sub(/\/.*/, "", $2); print $2}'); do
+        if [ "$ip" = "$self_ip" ]; then
+            local_fetch_info | tee "$cache"
+            return
+        fi
+    done
+
+    user=$(remote_user "$ip")
+    [ -z "$user" ] && user=$(probe_remote_user "$ip")
+    if [ -n "$user" ]; then
+        info=$(ssh -n -o BatchMode=yes -o ConnectTimeout=1 -o StrictHostKeyChecking=accept-new "$user@$ip" 'distro=$(awk -F= '\''$1 == "PRETTY_NAME" {gsub(/"/, "", $2); print $2; exit}'\'' /etc/os-release 2>/dev/null); [ -z "$distro" ] && distro=$(uname -s); kernel=$(uname -r 2>/dev/null); up=$(uptime -p 2>/dev/null | sed '\''s/^up //'\''); [ -z "$up" ] && up=unknown; printf "%s|%s|%s\n" "$distro" "$kernel" "$up"' 2>/dev/null)
+        if [ -n "$info" ]; then
+            printf '%s\n' "$info" | tee "$cache"
+            return
+        fi
+    fi
+
+    if [ -f "$cache" ] && ! awk -F '|' '$2 == "unknown" || $3 == "unknown" {bad=1} END {exit bad ? 0 : 1}' "$cache"; then
+        cat "$cache"
+        return
+    fi
+
+    printf '%s|SSH unavailable|SSH unavailable\n' "$(fallback_distro "$ip")" | tee "$cache"
+}
+
+network_fetch_panel() {
+    tmp="$1"
+    list="/tmp/lan-watcher-fetch-list.$$"
+    self_ips=$(ip -4 addr show 2>/dev/null | awk '/inet / {sub(/\/.*/, "", $2); print $2}')
+    row=11
+    max_devices=4
+
+    right_line_at "$row" '┌' '┐'
+    row=$((row + 1))
+    right_text_at "$row" 'Network Fetch'
+    row=$((row + 1))
+    right_line_at "$row" '├' '┤'
+    row=$((row + 1))
+
+    sort -t . -k 1,1n -k 2,2n -k 3,3n -k 4,4n "$tmp" | awk -F '|' '!seen[$1]++' > "$list"
+
+    while IFS='|' read -r ip mac name status; do
+        for self_ip in $self_ips; do
+            [ "$ip" = "$self_ip" ] && continue 2
+        done
+
+        case "$name" in
+            router|Router|phone|Phone|SubOS2|self|Self|'Network monitor'|'Network Monitor'|'Unknown device'|-|'') continue ;;
+        esac
+        case "$status" in
+            offline) continue ;;
+        esac
+
+        [ "$max_devices" -le 0 ] && break
+
+        info=$(fetch_info "$ip")
+        distro=$(printf '%s\n' "$info" | awk -F '|' '{print $1}')
+        kernel=$(printf '%s\n' "$info" | awk -F '|' '{print $2}')
+        up=$(printf '%s\n' "$info" | awk -F '|' '{print $3}')
+        up=$(short_uptime "$up")
+
+        right_text_at "$row" "$name"
+        row=$((row + 1))
+        right_text_at "$row" "  Distro: $distro"
+        row=$((row + 1))
+        right_text_at "$row" "  Kernel: $kernel"
+        row=$((row + 1))
+        right_text_at "$row" "  Uptime: $up"
+        row=$((row + 1))
+
+        max_devices=$((max_devices - 1))
+        if [ "$max_devices" -gt 0 ]; then
+            right_text_at "$row" ""
+            row=$((row + 1))
+        fi
+    done < "$list"
+
+    right_line_at "$row" '└' '┘'
+    rm -f "$list"
+    move_cursor $((row + 1)) 1
+}
+
+lookup_name() {
+    ip="$1"
+
+    if [ -f "$KNOWN_FILE" ]; then
+        awk -v ip="$ip" '
+            $1 == ip {
+                $1=""
+                sub(/^ /, "")
+                print
+                exit
+            }
+        ' "$KNOWN_FILE"
+    fi
+}
+
+is_authorized_mac() {
+    [ -f "$AUTH_FILE" ] || return 1
+    awk -v mac="$1" 'tolower($1) == tolower(mac) {found=1} END {exit found ? 0 : 1}' "$AUTH_FILE"
+}
+
+is_blocked_mac() {
+    [ -f "$BLOCK_FILE" ] || return 1
+    awk -v mac="$1" 'tolower($2) == tolower(mac) {found=1} END {exit found ? 0 : 1}' "$BLOCK_FILE"
+}
+
+record_blocked_device() {
+    ip="$1"
+    mac="$2"
+    name="$3"
+    stamp=$(date '+%Y-%m-%d_%H:%M:%S')
+
+    printf '%s %s %s %s\n' "$stamp" "$ip" "$mac" "$name" >> "$BLOCK_FILE"
+
+    if [ -n "$REMOTE_BLOCK_LOG" ] && command -v ssh >/dev/null 2>&1; then
+        printf '%s %s %s %s\n' "$stamp" "$ip" "$mac" "$name" | \
+            ssh -n -o BatchMode=yes -o ConnectTimeout=2 -o StrictHostKeyChecking=accept-new "${REMOTE_BLOCK_LOG%%:*}" \
+            "cat >> '${REMOTE_BLOCK_LOG#*:}'" >/dev/null 2>&1 || true
+    fi
+}
+
+save_known_name() {
+    ip="$1"
+    name="$2"
+    tmp_known="/tmp/lan-known-devices.$$"
+
+    if [ -f "$KNOWN_FILE" ]; then
+        awk -v ip="$ip" -v name="$name" '
+            $1 == ip {print ip " " name; done=1; next}
+            {print}
+            END {if (!done) print ip " " name}
+        ' "$KNOWN_FILE" > "$tmp_known"
+    else
+        printf '%s %s\n' "$ip" "$name" > "$tmp_known"
+    fi
+
+    mv "$tmp_known" "$KNOWN_FILE"
+}
+
+authorize_devices() {
+    tmp="$1"
+    list="/tmp/lan-watcher-auth.$$"
+
+    awk -F '|' '$4 == "online" && $2 != "-" {print $1 "|" $2 "|" $3}' "$tmp" | sort -u > "$list"
+
+    while IFS='|' read -r ip mac name; do
+        [ -z "$ip" ] && continue
+
+        if is_blocked_mac "$mac"; then
+            new_tmp="/tmp/lan-watcher-blocked.$$"
+            awk -F '|' -v ip="$ip" 'BEGIN {OFS="|"} $1 == ip {$4="blocked"} {print}' "$tmp" > "$new_tmp"
+            mv "$new_tmp" "$tmp"
+            continue
+        fi
+
+        if is_authorized_mac "$mac"; then
+            continue
+        fi
+
+        if ! exec 3<> /dev/tty; then
+            new_tmp="/tmp/lan-watcher-pending.$$"
+            awk -F '|' -v ip="$ip" 'BEGIN {OFS="|"} $1 == ip {$4="pending"} {print}' "$tmp" > "$new_tmp"
+            mv "$new_tmp" "$tmp"
+            continue
+        fi
+
+        printf '\n%s┌───────────────────────────────────────────────────────────────┐%s\n' "$RED" "$RESET" >&3
+        printf '%s│%s Device authorization required                                %s│%s\n' "$RED" "$TEXT" "$RED" "$RESET" >&3
+        printf '%s├───────────────────────────────────────────────────────────────┤%s\n' "$RED" "$RESET" >&3
+        printf '%s│%s IP:   %-53.53s %s│%s\n' "$RED" "$TEXT" "$ip" "$RED" "$RESET" >&3
+        printf '%s│%s MAC:  %-53.53s %s│%s\n' "$RED" "$TEXT" "$mac" "$RED" "$RESET" >&3
+        printf '%s│%s Name: %-53.53s %s│%s\n' "$RED" "$TEXT" "$name" "$RED" "$RESET" >&3
+        printf '%s└───────────────────────────────────────────────────────────────┘%s\n\n' "$RED" "$RESET" >&3
+        printf '[a]llow / [b]lock: ' >&3
+        IFS= read -r decision <&3
+
+        case "$decision" in
+            b|B|block|BLOCK)
+                record_blocked_device "$ip" "$mac" "$name"
+                new_tmp="/tmp/lan-watcher-blocked.$$"
+                awk -F '|' -v ip="$ip" 'BEGIN {OFS="|"} $1 == ip {$4="blocked"} {print}' "$tmp" > "$new_tmp"
+                mv "$new_tmp" "$tmp"
+                exec 3>&-
+                continue
+                ;;
+        esac
+
+        if [ "$name" = "-" ] || [ -z "$name" ]; then
+            printf 'Custom name: ' >&3
+            IFS= read -r name <&3
+            [ -z "$name" ] && name="Unknown device"
+            save_known_name "$ip" "$name"
+        fi
+
+        printf '%s %s %s\n' "$mac" "$ip" "$name" >> "$AUTH_FILE"
+        exec 3>&-
+        new_tmp="/tmp/lan-watcher-authorized.$$"
+        awk -F '|' -v ip="$ip" -v name="$name" 'BEGIN {OFS="|"} $1 == ip {$3=name; $4="online"} {print}' "$tmp" > "$new_tmp"
+        mv "$new_tmp" "$tmp"
+    done < "$list"
+
+    rm -f "$list"
+}
+
+emit_state_events() {
+    tmp="$1"
+    event_current="/tmp/lan-watcher-state.$$"
+    event_sorted="/tmp/lan-watcher-state-sorted.$$"
+
+    sort -t . -k 1,1n -k 2,2n -k 3,3n -k 4,4n "$tmp" > "$event_sorted"
+    awk -F '|' '!seen[$1]++ {print $1 "|" $4}' "$event_sorted" > "$event_current"
+    rm -f "$event_sorted"
+
+    [ -f "$event_current" ] || return
+
+    if [ -f "$STATE_FILE" ]; then
+        changed=0
+        while IFS='|' read -r ip status; do
+            [ -z "$ip" ] && continue
+            old=$(awk -F '|' -v ip="$ip" '$1 == ip {print $2; exit}' "$STATE_FILE")
+            [ -z "$old" ] && old="new"
+
+            if [ "$old" != "$status" ]; then
+                case "$status" in
+                    online|offline|pending|blocked) changed=1 ;;
+                esac
+            fi
+        done < "$event_current"
+
+        [ "$changed" -eq 1 ] && beep
+    fi
+
+    cp "$event_current" "$STATE_FILE"
+    rm -f "$event_current"
+}
+
+update_online_since() {
+    tmp="$1"
+    now=$(date +%s)
+    new_since="/tmp/lan-watcher-online-since.$$"
+    old_since="$ONLINE_SINCE_FILE"
+
+    : > "$new_since"
+
+    sort -t . -k 1,1n -k 2,2n -k 3,3n -k 4,4n "$tmp" | awk -F '|' '!seen[$1]++' | while IFS='|' read -r ip mac name status; do
+        case "$status" in
+            online)
+                since=""
+                if [ -f "$old_since" ]; then
+                    since=$(awk -F '|' -v ip="$ip" '$1 == ip {print $2; exit}' "$old_since")
+                fi
+                [ -z "$since" ] && since="$now"
+                printf '%s|%s\n' "$ip" "$since" >> "$new_since"
+                ;;
+        esac
+    done
+
+    cp "$new_since" "$ONLINE_SINCE_FILE"
+    rm -f "$new_since"
+}
+
+online_duration_for() {
+    ip="$1"
+    now=$(date +%s)
+
+    if [ -f "$ONLINE_SINCE_FILE" ]; then
+        since=$(awk -F '|' -v ip="$ip" '$1 == ip {print $2; exit}' "$ONLINE_SINCE_FILE")
+    fi
+
+    [ -z "$since" ] && since="$now"
+    short_duration "$((now - since))"
+}
+
+prompt_unknown_devices() {
+    tmp="$1"
+    unknown="/tmp/lan-watcher-unknown.$$"
+
+    awk -F '|' '$3 == "-" && $4 == "online" {print $1 "|" $2}' "$tmp" | sort -u > "$unknown"
+
+    while IFS='|' read -r ip mac; do
+        [ -z "$ip" ] && continue
+        if [ -f "$KNOWN_FILE" ] && awk -v ip="$ip" '$1 == ip {found=1} END {exit found ? 0 : 1}' "$KNOWN_FILE"; then
+            continue
+        fi
+
+        if [ -t 0 ]; then
+            clear_screen > /dev/tty
+            printf '%s┌───────────────────────────────────────────────────────────────┐%s\n' "$RED" "$RESET" > /dev/tty
+            printf '%s│%s New device detected                                           %s│%s\n' "$RED" "$TEXT" "$RED" "$RESET" > /dev/tty
+            printf '%s├───────────────────────────────────────────────────────────────┤%s\n' "$RED" "$RESET" > /dev/tty
+            printf '%s│%s IP:  %-54.54s %s│%s\n' "$RED" "$TEXT" "$ip" "$RED" "$RESET" > /dev/tty
+            printf '%s│%s MAC: %-54.54s %s│%s\n' "$RED" "$TEXT" "$mac" "$RED" "$RESET" > /dev/tty
+            printf '%s└───────────────────────────────────────────────────────────────┘%s\n\n' "$RED" "$RESET" > /dev/tty
+            printf 'Custom name for this device: ' > /dev/tty
+            IFS= read -r name < /dev/tty
+        else
+            continue
+        fi
+
+        [ -z "$name" ] && name="Unknown device"
+        printf '%s %s\n' "$ip" "$name" >> "$KNOWN_FILE"
+
+        new_tmp="/tmp/lan-watcher-rename.$$"
+        awk -F '|' -v ip="$ip" -v name="$name" 'BEGIN {OFS="|"} $1 == ip {$3=name} {print}' "$tmp" > "$new_tmp"
+        mv "$new_tmp" "$tmp"
+    done < "$unknown"
+
+    rm -f "$unknown"
+}
+
+scan_once() {
+    tmp="/tmp/lan-watcher.$$"
+    : > "$tmp"
+
+    i=1
+    while [ "$i" -le 254 ]; do
+        ip="$SUBNET.$i"
+        ping -c 1 -W 1 "$ip" >/dev/null 2>&1 &
+        i=$((i + 1))
+    done
+    wait
+
+    self_ips=$(ip -4 addr show 2>/dev/null | awk '/inet / {sub(/\/.*/, "", $2); print $2}')
+
+    for self_ip in $self_ips; do
+        case "$self_ip" in
+            "$SUBNET".*)
+                self_mac=$(ip -o link show 2>/dev/null | awk '/link\/ether/ {print $17; exit}')
+                self_name=$(lookup_name "$self_ip")
+                [ -z "$self_name" ] && self_name="self"
+                printf '%s|%s|%s|online\n' "$self_ip" "${self_mac:--}" "$self_name" >> "$tmp"
+                ;;
+        esac
+    done
+
+    ip neigh show | while read -r line; do
+        ip=$(printf "%s\n" "$line" | awk '{print $1}')
+        mac=$(printf "%s\n" "$line" | awk '{for (i=1; i<=NF; i++) if ($i == "lladdr") print $(i+1)}')
+        state=$(printf "%s\n" "$line" | awk '{print $NF}')
+
+        case "$ip" in
+            "$SUBNET".*) ;;
+            *) continue ;;
+        esac
+
+        [ -z "$mac" ] && continue
+        [ "$state" = "FAILED" ] && continue
+        [ "$state" = "INCOMPLETE" ] && continue
+
+        name=$(lookup_name "$ip")
+        [ -z "$name" ] && name="-"
+
+        printf '%s|%s|%s|online\n' "$ip" "$mac" "$name" >> "$tmp"
+    done
+
+    prompt_unknown_devices "$tmp"
+    authorize_devices "$tmp"
+
+    if [ -f "$KNOWN_FILE" ]; then
+        while read -r known_ip known_name; do
+            [ -z "$known_ip" ] && continue
+            case "$known_ip" in \#*) continue ;; esac
+
+            if ! awk -F '|' -v ip="$known_ip" '$1 == ip {found=1} END {exit found ? 0 : 1}' "$tmp"; then
+                [ -z "$known_name" ] && known_name="-"
+                printf '%s|%s|%s|offline\n' "$known_ip" "-" "$known_name" >> "$tmp"
+            fi
+        done < "$KNOWN_FILE"
+    fi
+
+    emit_state_events "$tmp"
+    update_online_since "$tmp"
+
+    count=$(sort -t . -k 1,1n -k 2,2n -k 3,3n -k 4,4n "$tmp" | awk -F '|' '!seen[$1]++ && $4 != "offline" {c++} END {print c + 0}')
+    host_up=$(uptime -p 2>/dev/null | sed 's/^up //')
+    [ -z "$host_up" ] && host_up="unknown"
+
+    line
+    box_text "Pacpan's Network Monitor"
+    midline
+    box_text "Host: $(hostname)  Online: $count  Scan: ${INTERVAL}s"
+    box_text "Time: $(date)"
+    box_text "Uptime: $host_up"
+    box_text "Subnet: ${SUBNET}.0/24"
+    bottom_line
+
+    printf '\n'
+    line
+    box_text "Devices"
+    midline
+    printf '%s│%s   %-13.13s %-17.17s  %-22.22s %-7.7s %-7.7s   %s│%s\n' "$RED" "$TEXT" "IP" "MAC" "NAME" "STATUS" "UPTIME" "$RED" "$RESET"
+
+    sort -t . -k 1,1n -k 2,2n -k 3,3n -k 4,4n "$tmp" | awk -F '|' '!seen[$1]++' | while IFS='|' read -r ip mac name status; do
+        case "$status" in
+            online) color="$GREEN" ;;
+            offline) color="$DIM" ;;
+            pending|blocked) color="$YELLOW" ;;
+            *) color="$DIM" ;;
+        esac
+
+        uptime="-"
+        [ "$status" = "online" ] && uptime=$(online_duration_for "$ip")
+
+        printf '%s│%s %s*%s%s %-13.13s %-17.17s  %-22.22s %-7.7s %-7.7s   %s│%s\n' "$RED" "$TEXT" "$color" "$TEXT" "$TEXT" "$ip" "$mac" "$name" "$status" "$uptime" "$RED" "$RESET"
+    done
+
+    visible_count=$(sort -t . -k 1,1n -k 2,2n -k 3,3n -k 4,4n "$tmp" | awk -F '|' '!seen[$1]++ {c++} END {print c + 0}')
+    blank_rows=$((DEVICE_ROWS - visible_count))
+    while [ "$blank_rows" -gt 0 ]; do
+        box_text ""
+        blank_rows=$((blank_rows - 1))
+    done
+    bottom_line
+    
+    system_panel
+    network_fetch_panel "$tmp"
+
+    rm -f "$tmp"
+}
+
+trap 'show_cursor; exit' INT TERM EXIT
+
+setup_tty_font
+init_data_files
+clear_screen
+show_cursor
+previous="/tmp/lan-watcher.previous.$$"
+
+while true; do
+    current="/tmp/lan-watcher.current.$$"
+    scan_once > "$current"
+
+    if [ ! -f "$previous" ] || ! cmp -s "$current" "$previous"; then
+        home_cursor
+        cat "$current"
+        clear_to_end
+        mv "$current" "$previous"
+    else
+        rm -f "$current"
+    fi
+
+
+    sleep "$INTERVAL"
+done

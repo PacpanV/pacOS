@@ -1,0 +1,6 @@
+lan-known-devices.txt
+lan-authorized-macs.txt
+lan-blocked-devices.txt
+lan-ssh-users.txt
+lan-online-since.txt
+*.log
