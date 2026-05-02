@@ -1,6 +1,6 @@
 # pacOS
 
-Personal collection of scripts, tools, and experiments by Francisco "Pacpan".
+Personal collection of scripts, tools, and experiments by "Pacpan".
 
 ## Projects
 
