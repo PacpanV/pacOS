@@ -8,7 +8,7 @@ It can also trigger a beep alert when device status changes, making it useful as
 
 ## Author
 
-Francisco "Pacpan"
+Pacpan
 
 GitHub: <https://github.com/PacpanV>
 
