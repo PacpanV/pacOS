@@ -1,6 +1,15 @@
 #!/bin/sh
 
-SUBNET="${1:-192.168.0}"
+detect_default_subnet() {
+    detected_ip=$(ip -4 route get 1.1.1.1 2>/dev/null | sed -n 's/.* src \([0-9.][0-9.]*\).*/\1/p' | sed -n '1p')
+
+    case "$detected_ip" in
+        *.*.*.*) printf '%s\n' "${detected_ip%.*}" ;;
+        *) printf '192.168.1\n' ;;
+    esac
+}
+
+SUBNET="${1:-$(detect_default_subnet)}"
 KNOWN_FILE="${KNOWN_FILE:-$HOME/lan-known-devices.txt}"
 AUTH_FILE="${AUTH_FILE:-$HOME/lan-authorized-macs.txt}"
 BLOCK_FILE="${BLOCK_FILE:-$HOME/lan-blocked-devices.txt}"
