@@ -69,6 +69,14 @@ pacpantop 10.0.0
 
 Pass only the first three octets of the subnet. For example, pacpantop 10.0.0 scans 10.0.0.1 through 10.0.0.254.
 
+Demo:
+
+Try the visual browser demo:
+
+https://pacpanv.github.io/pacOS/projects/pacpantop/demo/
+
+The demo uses fake LAN data. Browsers cannot scan a user's LAN directly; install pacpantop to monitor a real local network.
+
 
 License:
 

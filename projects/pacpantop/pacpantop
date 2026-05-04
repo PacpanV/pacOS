@@ -18,7 +18,9 @@ BLOCK_FILE="$HOME/lan-blocked-devices.txt"
 REMOTE_BLOCK_LOG="${REMOTE_BLOCK_LOG:-}"
 STATE_FILE="/tmp/lan-watcher-state"
 ONLINE_SINCE_FILE="$HOME/lan-online-since.txt"
-DEVICE_ROWS=8
+LAST_SCAN_FILE="/tmp/lan-watcher-last"
+MAN_PAGE="${PACPANTOP_MAN:-$HOME/pacpantop.1}"
+DEVICE_ROWS=5
 
 ESC=$(printf '\033')
 RESET="${ESC}[0m"
@@ -127,6 +129,11 @@ bottom_line() {
 box_text() {
     text="$1"
     printf '%s│%s %-75.75s %s│%s\n' "$RED" "$TEXT" "$text" "$RED" "$RESET"
+}
+
+controls_panel() {
+    printf '\n'
+    box_text "[ Authorize pending ] [ Block unknown ] [ Reset ] [ Man page ]"
 }
 
 right_line_at() {
@@ -402,6 +409,130 @@ save_known_name() {
     mv "$tmp_known" "$KNOWN_FILE"
 }
 
+first_pending_device() {
+    [ -f "$LAST_SCAN_FILE" ] || return 1
+    awk -F '|' '$4 == "pending" || ($3 == "-" && $4 == "online") {print; exit}' "$LAST_SCAN_FILE"
+}
+
+authorize_pending_action() {
+    device=$(first_pending_device) || return
+    [ -z "$device" ] && return
+
+    ip=$(printf '%s\n' "$device" | awk -F '|' '{print $1}')
+    mac=$(printf '%s\n' "$device" | awk -F '|' '{print $2}')
+    name=$(printf '%s\n' "$device" | awk -F '|' '{print $3}')
+
+    if ! exec 3<> /dev/tty; then
+        return
+    fi
+
+    clear_screen >&3
+    printf '%s┌───────────────────────────────────────────────────────────────┐%s\n' "$RED" "$RESET" >&3
+    printf '%s│%s Authorize pending device                                     %s│%s\n' "$RED" "$TEXT" "$RED" "$RESET" >&3
+    printf '%s├───────────────────────────────────────────────────────────────┤%s\n' "$RED" "$RESET" >&3
+    printf '%s│%s IP:   %-53.53s %s│%s\n' "$RED" "$TEXT" "$ip" "$RED" "$RESET" >&3
+    printf '%s│%s MAC:  %-53.53s %s│%s\n' "$RED" "$TEXT" "$mac" "$RED" "$RESET" >&3
+    printf '%s│%s Name: %-53.53s %s│%s\n' "$RED" "$TEXT" "$name" "$RED" "$RESET" >&3
+    printf '%s└───────────────────────────────────────────────────────────────┘%s\n\n' "$RED" "$RESET" >&3
+
+    if [ "$name" = "-" ] || [ -z "$name" ]; then
+        printf 'Custom name: ' >&3
+        IFS= read -r name <&3
+        [ -z "$name" ] && name="Unknown device"
+        save_known_name "$ip" "$name"
+    fi
+
+    printf '%s %s %s\n' "$mac" "$ip" "$name" >> "$AUTH_FILE"
+    printf '\nAuthorized. Press Enter to return. ' >&3
+    IFS= read -r _ <&3
+    exec 3>&-
+}
+
+block_unknown_action() {
+    [ -f "$LAST_SCAN_FILE" ] || return
+    device=$(awk -F '|' '($3 == "-" || $3 == "Unknown device") && $4 != "blocked" {print; exit}' "$LAST_SCAN_FILE")
+    [ -z "$device" ] && return
+
+    ip=$(printf '%s\n' "$device" | awk -F '|' '{print $1}')
+    mac=$(printf '%s\n' "$device" | awk -F '|' '{print $2}')
+    name=$(printf '%s\n' "$device" | awk -F '|' '{print $3}')
+    [ -z "$name" ] || [ "$name" = "-" ] && name="Unknown device"
+
+    record_blocked_device "$ip" "$mac" "$name"
+}
+
+reset_display_action() {
+    rm -f "$STATE_FILE" "$LAST_SCAN_FILE" "$previous" 2>/dev/null || true
+    rm -rf "$FETCH_CACHE_DIR" 2>/dev/null || true
+    clear_screen
+}
+
+show_commands_action() {
+    old_cmd_stty=$(stty -g < /dev/tty 2>/dev/null || true)
+
+    if [ -n "$old_cmd_stty" ]; then
+        stty -icanon -echo min 0 time 1 < /dev/tty 2>/dev/null || true
+        dd bs=32 count=1 of=/dev/null 2>/dev/null < /dev/tty || true
+        stty "$old_cmd_stty" < /dev/tty 2>/dev/null || true
+    fi
+
+    clear_screen > /dev/tty
+    {
+        line
+        box_text "pacpantop commands"
+        midline
+        box_text "a       Authorize the first pending or unknown visible device"
+        box_text "b       Block the first unknown visible device"
+        box_text "r       Reset display state and network fetch cache"
+        box_text "m       Show this man page / commands screen"
+        box_text "Ctrl+C  Quit pacpantop"
+        bottom_line
+        printf '\n'
+    } > /dev/tty
+    printf 'Press any key to return. ' > /dev/tty
+
+    if [ -n "$old_cmd_stty" ]; then
+        stty -icanon -echo min 1 time 0 < /dev/tty 2>/dev/null || true
+        dd bs=1 count=1 of=/dev/null 2>/dev/null < /dev/tty || true
+        stty "$old_cmd_stty" < /dev/tty 2>/dev/null || true
+    else
+        sleep 3
+    fi
+
+    rm -f "$previous" 2>/dev/null || true
+    clear_screen > /dev/tty
+}
+
+wait_for_key() {
+    [ -t 0 ] || {
+        sleep "$INTERVAL"
+        return
+    }
+
+    old_stty=$(stty -g 2>/dev/null || true)
+    [ -n "$old_stty" ] || {
+        sleep "$INTERVAL"
+        return
+    }
+
+    wait_time=$((INTERVAL * 10))
+    [ "$wait_time" -gt 0 ] 2>/dev/null || wait_time=10
+
+    stty -icanon -echo min 0 time "$wait_time" 2>/dev/null || {
+        sleep "$INTERVAL"
+        return
+    }
+    key=$(dd bs=1 count=1 2>/dev/null < /dev/tty || true)
+    stty "$old_stty" 2>/dev/null || true
+
+    case "$key" in
+        a|A) authorize_pending_action ;;
+        b|B) block_unknown_action ;;
+        r|R) reset_display_action ;;
+        m|M|h|H|\?) show_commands_action ;;
+    esac
+}
+
 authorize_devices() {
     tmp="$1"
     list="/tmp/lan-watcher-auth.$$"
@@ -641,7 +772,7 @@ scan_once() {
     [ -z "$host_up" ] && host_up="unknown"
 
     line
-    box_text "Pacpan's Network Monitor"
+    box_text "pacpantop"
     midline
     box_text "Host: $(hostname)  Online: $count  Scan: ${INTERVAL}s"
     box_text "Time: $(date)"
@@ -655,7 +786,7 @@ scan_once() {
     midline
     printf '%s│%s   %-13.13s %-17.17s  %-22.22s %-7.7s %-7.7s   %s│%s\n' "$RED" "$TEXT" "IP" "MAC" "NAME" "STATUS" "UPTIME" "$RED" "$RESET"
 
-    sort -t . -k 1,1n -k 2,2n -k 3,3n -k 4,4n "$tmp" | awk -F '|' '!seen[$1]++' | while IFS='|' read -r ip mac name status; do
+    sort -t . -k 1,1n -k 2,2n -k 3,3n -k 4,4n "$tmp" | awk -F '|' -v max="$DEVICE_ROWS" '!seen[$1]++ && ++shown <= max' | while IFS='|' read -r ip mac name status; do
         case "$status" in
             online) color="$GREEN" ;;
             offline) color="$DIM" ;;
@@ -669,13 +800,15 @@ scan_once() {
         printf '%s│%s %s*%s%s %-13.13s %-17.17s  %-22.22s %-7.7s %-7.7s   %s│%s\n' "$RED" "$TEXT" "$color" "$TEXT" "$TEXT" "$ip" "$mac" "$name" "$status" "$uptime" "$RED" "$RESET"
     done
 
-    visible_count=$(sort -t . -k 1,1n -k 2,2n -k 3,3n -k 4,4n "$tmp" | awk -F '|' '!seen[$1]++ {c++} END {print c + 0}')
+    visible_count=$(sort -t . -k 1,1n -k 2,2n -k 3,3n -k 4,4n "$tmp" | awk -F '|' -v max="$DEVICE_ROWS" '!seen[$1]++ && ++shown <= max {c++} END {print c + 0}')
+    cp "$tmp" "$LAST_SCAN_FILE"
     blank_rows=$((DEVICE_ROWS - visible_count))
     while [ "$blank_rows" -gt 0 ]; do
         box_text ""
         blank_rows=$((blank_rows - 1))
     done
     bottom_line
+    controls_panel
     
     system_panel
     network_fetch_panel "$tmp"
@@ -704,6 +837,5 @@ while true; do
         rm -f "$current"
     fi
 
-
-    sleep "$INTERVAL"
+    wait_for_key
 done

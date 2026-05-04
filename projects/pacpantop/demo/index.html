@@ -1,0 +1,339 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>pacpantop demo</title>
+  <style>
+    :root {
+      color-scheme: dark;
+      --bg: #000;
+      --red: #ff3333;
+      --blue: #4c8dff;
+      --green: #33ff66;
+      --yellow: #ffcc33;
+      --dim: #777;
+      --text: #ddd;
+    }
+
+    * {
+      box-sizing: border-box;
+    }
+
+    body {
+      margin: 0;
+      min-height: 100vh;
+      background: var(--bg);
+      color: var(--blue);
+      font-family: "Liberation Mono", Consolas, "Courier New", monospace;
+      font-size: 15px;
+      line-height: 1.2;
+      padding: 10px;
+    }
+
+    main {
+      max-width: 1220px;
+      margin: 0 auto;
+    }
+
+    .term {
+      white-space: pre;
+      overflow-x: auto;
+      margin: 0;
+      width: max-content;
+      max-width: 100%;
+    }
+
+    .red { color: var(--red); }
+    .blue { color: var(--blue); }
+    .green { color: var(--green); }
+    .yellow { color: var(--yellow); }
+    .dim { color: var(--dim); }
+    .text { color: var(--text); }
+
+    .note {
+      margin-top: 12px;
+      color: var(--dim);
+      white-space: normal;
+      max-width: 900px;
+    }
+
+    .actions {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 8px;
+      margin-top: 8px;
+    }
+
+    button {
+      background: #000;
+      border: 1px solid var(--red);
+      color: var(--blue);
+      font: inherit;
+      padding: 5px 8px;
+      cursor: pointer;
+    }
+
+    button:hover {
+      color: var(--green);
+      border-color: var(--green);
+    }
+
+    .manual {
+      display: none;
+      white-space: pre-wrap;
+      max-width: 900px;
+      margin: 12px 0 0;
+      padding: 8px;
+      border: 1px solid var(--red);
+      color: var(--blue);
+    }
+
+    .manual.open {
+      display: block;
+    }
+
+    @media (max-width: 700px) {
+      body {
+        font-size: 12px;
+        padding: 6px;
+      }
+    }
+  </style>
+</head>
+<body>
+  <main>
+    <pre id="screen" class="term" aria-label="pacpantop terminal demo"></pre>
+    <div class="actions">
+      <button type="button" id="authorize">Authorize pending</button>
+      <button type="button" id="block">Block unknown</button>
+      <button type="button" id="reset">Reset demo</button>
+      <button type="button" id="manual-toggle">Man page</button>
+    </div>
+    <pre id="manual" class="manual">pacpantop - lightweight TTY LAN monitor
+
+What it does:
+  Scans a local /24 network, reads visible devices from the neighbor table,
+  tracks known/unknown devices, and displays status in a terminal interface.
+
+Demo buttons:
+  Authorize pending - turns the first pending device into a trusted device.
+  Block unknown     - marks the unknown sample device as blocked.
+  Reset demo        - restores the fake sample data.
+  Man page          - shows or hides this help text.
+
+Real TTY shortcuts:
+  a       authorize the first pending/unknown visible device
+  b       block the first unknown visible device
+  r       reset display state and fetch cache
+  m, h, ? open the local pacpantop manual when available
+  Ctrl+C  quit pacpantop
+
+Note:
+  This browser demo uses fake LAN data. Install pacpantop to monitor a real LAN.</pre>
+    <p class="note">Demo mode: this page uses fake LAN data. Browsers cannot run ping, read ip neigh, see MAC addresses, or scan your LAN directly. Install pacpantop to monitor a real local network.</p>
+  </main>
+
+  <script>
+    const colors = {
+      red: "red",
+      blue: "blue",
+      green: "green",
+      yellow: "yellow",
+      dim: "dim",
+      text: "text"
+    };
+
+    const initialDevices = [
+      { ip: "10.0.0.1", mac: "aa:bb:cc:00:00:01", name: "router", status: "online", since: "02h 14m" },
+      { ip: "10.0.0.24", mac: "aa:bb:cc:00:00:24", name: "workstation", status: "online", since: "01h 02m" },
+      { ip: "10.0.0.41", mac: "aa:bb:cc:00:00:41", name: "phone", status: "online", since: "00h 46m" },
+      { ip: "10.0.0.77", mac: "aa:bb:cc:00:00:77", name: "unknown", status: "pending", since: "00h 01m" },
+      { ip: "10.0.0.88", mac: "aa:bb:cc:00:00:88", name: "old-laptop", status: "offline", since: "-" }
+    ];
+
+    const changes = [
+      { index: 4, status: "online", since: "00h 00m", event: "old-laptop came online" },
+      { index: 2, status: "offline", since: "-", event: "phone went offline" },
+      { index: 2, status: "online", since: "00h 00m", event: "phone returned" },
+      { index: 3, status: "blocked", since: "-", event: "unknown device blocked" },
+      { index: 3, status: "pending", since: "00h 00m", event: "unknown device appeared again" }
+    ];
+
+    let devices = initialDevices.map(device => ({ ...device }));
+    let events = ["demo started"];
+    let step = 0;
+
+    function esc(text) {
+      return String(text).replace(/[&<>]/g, char => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;" }[char]));
+    }
+
+    function span(color, text) {
+      return `<span class="${colors[color]}">${esc(text)}</span>`;
+    }
+
+    function pad(text, width) {
+      text = String(text);
+      return text.length >= width ? text.slice(0, width) : text + " ".repeat(width - text.length);
+    }
+
+    function statusColor(status) {
+      if (status === "online") return "green";
+      if (status === "pending") return "yellow";
+      if (status === "blocked") return "yellow";
+      return "dim";
+    }
+
+    function blank(width) {
+      return " ".repeat(width);
+    }
+
+    function leftLine(left, fill, right) {
+      return span("red", left + fill.repeat(77) + right);
+    }
+
+    function leftText(text) {
+      return span("red", "│") + span("blue", " " + pad(text, 75) + " ") + span("red", "│");
+    }
+
+    function rightLine(left, fill, right) {
+      return span("red", left + fill.repeat(38) + right);
+    }
+
+    function rightText(text) {
+      return span("red", "│") + span("blue", " " + pad(text, 36) + " ") + span("red", "│");
+    }
+
+    function joinPanels(left, right) {
+      const leftText = left || blank(79);
+      const rightText = right || "";
+      return rightText ? `${leftText}  ${rightText}` : leftText;
+    }
+
+    function deviceHeader() {
+      const text = "   " + pad("IP", 13) + " " + pad("MAC", 17) + "  " + pad("NAME", 22) + " " + pad("STATUS", 7) + " " + pad("UPTIME", 7) + "   ";
+      return span("red", "│") + span("blue", text) + span("red", "│");
+    }
+
+    function deviceRow(device) {
+      const textBeforeStar = " ";
+      const textAfterStar = " " + pad(device.ip, 13) + " " + pad(device.mac, 17) + "  " + pad(device.name, 22) + " " + pad(device.status, 7) + " " + pad(device.since, 7) + "   ";
+      return span("red", "│") + span("blue", textBeforeStar) + span(statusColor(device.status), "*") + span("blue", textAfterStar) + span("red", "│");
+    }
+
+    function render() {
+      const visible = devices.filter(device => device.status !== "offline").length;
+      const left = [];
+      const right = [];
+
+      left.push(leftLine("┌", "─", "┐"));
+      left.push(leftText("pacpantop"));
+      left.push(leftLine("├", "─", "┤"));
+      left.push(leftText(`Host: old-potato  Online: ${visible}  Scan: 1s`));
+      left.push(leftText(`Time: ${new Date().toString()}`));
+      left.push(leftText("Uptime: 20 hours, 14 minutes"));
+      left.push(leftText("Subnet: 10.0.0.0/24"));
+      left.push(leftLine("└", "─", "┘"));
+      left.push("");
+      left.push(leftLine("┌", "─", "┐"));
+      left.push(leftText("Devices"));
+      left.push(leftLine("├", "─", "┤"));
+      left.push(deviceHeader());
+
+      devices.forEach(device => {
+        left.push(deviceRow(device));
+      });
+
+      while (left.length < 18) left.push(leftText(""));
+      left.push(leftLine("└", "─", "┘"));
+
+      right[0] = rightLine("┌", "─", "┐");
+      right[1] = rightText("Host System");
+      right[2] = rightLine("├", "─", "┤");
+      right[3] = rightText("OS: Debian GNU/Linux 11");
+      right[4] = rightText("OS age: 3y 2m 8d");
+      right[5] = rightText("Arch: i686");
+      right[6] = rightText("Kernel: 5.10.0-32-686-pae");
+      right[7] = rightText("Uptime: 20 hours, 14 minutes");
+      right[8] = rightLine("└", "─", "┘");
+
+      right[10] = rightLine("┌", "─", "┐");
+      right[11] = rightText("Network Fetch");
+      right[12] = rightLine("├", "─", "┤");
+      right[13] = rightText("workstation");
+      right[14] = rightText("  Distro: Arch Linux");
+      right[15] = rightText("  Kernel: 6.x");
+      right[16] = rightText("  Uptime: 4h 12m");
+      right[17] = rightText("");
+      right[18] = rightText("old-laptop");
+      right[19] = rightText("  Distro: Debian GNU/Linux");
+      right[20] = rightText("  Kernel: 5.10");
+      right[21] = rightText("  Uptime: 20h 14m");
+      right[22] = rightLine("└", "─", "┘");
+
+      const rows = Math.max(left.length, right.length);
+      let out = "";
+      for (let i = 0; i < rows; i += 1) {
+        out += joinPanels(left[i], right[i]) + "\n";
+      }
+
+      document.querySelector("#screen").innerHTML = out;
+    }
+
+    function addEvent(text) {
+      events.unshift(`${new Date().toLocaleTimeString()} ${text}`);
+      events = events.slice(0, 7);
+    }
+
+    function tick() {
+      const change = changes[step % changes.length];
+      devices[change.index].status = change.status;
+      devices[change.index].since = change.since;
+      addEvent(change.event);
+      step += 1;
+      render();
+    }
+
+    document.querySelector("#authorize").addEventListener("click", () => {
+      const target = devices.find(device => device.status === "pending");
+      if (!target) {
+        addEvent("no pending devices");
+        render();
+        return;
+      }
+      target.status = "online";
+      target.name = "trusted-device";
+      target.since = "00h 00m";
+      addEvent(`${target.ip} authorized`);
+      render();
+    });
+
+    document.querySelector("#block").addEventListener("click", () => {
+      const target = devices.find(device => device.name === "unknown" || device.name === "trusted-device");
+      if (!target) {
+        addEvent("no unknown device");
+        render();
+        return;
+      }
+      target.status = "blocked";
+      target.since = "-";
+      addEvent(`${target.ip} blocked`);
+      render();
+    });
+
+    document.querySelector("#reset").addEventListener("click", () => {
+      devices = initialDevices.map(device => ({ ...device }));
+      events = ["demo reset"];
+      step = 0;
+      render();
+    });
+
+    document.querySelector("#manual-toggle").addEventListener("click", () => {
+      document.querySelector("#manual").classList.toggle("open");
+    });
+
+    render();
+    setInterval(tick, 4000);
+  </script>
+</body>
+</html>

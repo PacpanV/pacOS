@@ -1,0 +1,86 @@
+.TH PACPANTOP 1 "May 2026" "pacpantop" "User Commands"
+.SH NAME
+pacpantop \- lightweight TTY LAN monitor for Linux
+.SH SYNOPSIS
+.B pacpantop
+.RI [ subnet-prefix ]
+.br
+.B pacpantop --beep-test
+.SH DESCRIPTION
+.B pacpantop
+scans a local /24 network, reads the local neighbor table, tracks visible devices,
+and displays device state in a terminal interface.
+.PP
+It is intended for low-resource TTY machines that stay on as simple LAN warning
+monitors. It can beep when device state changes and can optionally fetch extra
+system information from reachable Linux devices through SSH.
+.SH ARGUMENTS
+.TP
+.I subnet-prefix
+First three octets of the /24 subnet to scan. Example: 10.0.0 scans
+10.0.0.1 through 10.0.0.254.
+.SH DISPLAY
+.TP
+.B Host box
+Shows the monitor name, host, online device count, scan interval, time, uptime,
+and subnet.
+.TP
+.B Devices box
+Shows IP, MAC, known name, status, and uptime for visible or remembered devices.
+.TP
+.B Host System panel
+Shows local OS, architecture, kernel, uptime, and OS age.
+.TP
+.B Network Fetch panel
+Shows optional SSH/fallback information for selected reachable Linux devices.
+.SH STATUS VALUES
+.TP
+.B online
+The device is visible and authorized or already known.
+.TP
+.B offline
+The device is remembered but not currently visible.
+.TP
+.B pending
+The device needs authorization.
+.TP
+.B blocked
+The device was blocked by the user.
+.SH SHORTCUTS
+.TP
+.B a
+Authorize the first pending or unknown visible device. If it has no name,
+pacpantop asks for a custom name.
+.TP
+.B b
+Block the first unknown visible device.
+.TP
+.B r
+Reset the display state and fetch cache. This does not delete known devices,
+authorized MACs, or blocked-device history.
+.TP
+.B m
+Open this manual page when available.
+.TP
+.B Ctrl+C
+Quit pacpantop.
+.SH FILES
+.TP
+.I ~/lan-known-devices.txt
+Saved local device names.
+.TP
+.I ~/lan-authorized-macs.txt
+Authorized MAC addresses.
+.TP
+.I ~/lan-blocked-devices.txt
+Blocked-device log.
+.TP
+.I ~/lan-ssh-users.txt
+Optional SSH usernames for remote fetches.
+.TP
+.I ~/lan-online-since.txt
+Online duration tracking state.
+.SH NOTES
+Private LAN data files should not be published.
+.SH AUTHOR
+Pacpan
